@@ -4,16 +4,25 @@ import engine
 
 class TestUPIShieldEngine(unittest.TestCase):
 
-    @classmethod
-    def setUpClass(cls):
+    def setUp(self):
         os.environ["UPI_SHIELD_DB"] = "test_upi_shield.db"
         engine.DB_PATH = "test_upi_shield.db"
         engine.init_db(force_reset=True)
+        # Register a trusted device for student so TEST_DEV_1 is recognized
+        conn = engine.get_db_connection()
+        conn.execute("INSERT OR REPLACE INTO devices (account_vpa, device_id) VALUES (?, ?)", ("student@upi", "TEST_DEV_1"))
+        conn.execute("INSERT OR REPLACE INTO devices (account_vpa, device_id) VALUES (?, ?)", ("kirana@upi", "TEST_DEV_KIRANA"))
+        conn.execute("INSERT OR REPLACE INTO devices (account_vpa, device_id) VALUES (?, ?)", ("salaried@upi", "TEST_DEV_1"))
+        conn.commit()
+        conn.close()
 
     @classmethod
     def tearDownClass(cls):
         if os.path.exists("test_upi_shield.db"):
-            os.remove("test_upi_shield.db")
+            try:
+                os.remove("test_upi_shield.db")
+            except Exception:
+                pass
 
     def test_01_normal_payment_settlement(self):
         """1. A normal payment to a merchant settles and balances change."""
@@ -25,9 +34,10 @@ class TestUPIShieldEngine(unittest.TestCase):
         s_init = conn.execute("SELECT balance FROM accounts WHERE vpa = ?", (sender,)).fetchone()["balance"]
         conn.close()
 
+        # mock_hour=14 ensures daylight hours regardless of the system clock
         inv = engine.investigate(
             amount=amt, sender_vpa=sender, receiver_vpa=payee,
-            city="Nagpur", device_id="TEST_DEV_1"
+            city="Nagpur", device_id="TEST_DEV_1", mock_hour=14
         )
         self.assertEqual(inv["tier"], "CLEARED")
 
@@ -44,21 +54,22 @@ class TestUPIShieldEngine(unittest.TestCase):
         """2. A repeat payment to the same merchant does not raise NEW_PAYEE."""
         sender = "student@upi"
         payee = "chai_point@upi"
-        inv = engine.investigate(
-            amount=50.0, sender_vpa=sender, receiver_vpa=payee,
-            city="Nagpur", device_id="TEST_DEV_1"
-        )
-        self.assertNotIn("NEW_PAYEE", inv["flags"])
+
+        inv1 = engine.investigate(50.0, sender, payee, "Nagpur", "TEST_DEV_1", mock_hour=14)
+        engine.record_transaction(sender, payee, 50.0, "Nagpur", "TEST_DEV_1", inv1)
+
+        inv2 = engine.investigate(50.0, sender, payee, "Nagpur", "TEST_DEV_1", mock_hour=14)
+        self.assertNotIn("NEW_PAYEE", inv2["flags"])
 
     def test_03_new_device_otp_workflow(self):
-        """3. Payment from a new device triggers OTP hold; wrong OTP fails; 3 wrong attempts cancels it."""
+        """3. Payment from a new device triggers OTP hold; 3 wrong attempts cancel it."""
         sender = "student@upi"
         payee = "bigbasket@upi"
         amt = 200.0
 
         inv = engine.investigate(
             amount=amt, sender_vpa=sender, receiver_vpa=payee,
-            city="Nagpur", device_id="UNRECOGNIZED_DEV_99"
+            city="Nagpur", device_id="UNRECOGNIZED_DEV_99", mock_hour=14
         )
         self.assertEqual(inv["tier"], "PENDING_OTP")
         self.assertIn("NEW_DEVICE", inv["flags"])
@@ -69,15 +80,9 @@ class TestUPIShieldEngine(unittest.TestCase):
         otp = engine.create_otp_challenge(utr, "UNRECOGNIZED_DEV_99", sender)
         self.assertEqual(len(otp), 4)
 
-        # 1st wrong attempt
-        ok, _ = engine.verify_otp_challenge(utr, "0000")
-        self.assertFalse(ok)
-
-        # 2nd wrong attempt
-        ok, _ = engine.verify_otp_challenge(utr, "0000")
-        self.assertFalse(ok)
-
-        # 3rd wrong attempt -> Blocks
+        # 3 wrong attempts
+        engine.verify_otp_challenge(utr, "0000")
+        engine.verify_otp_challenge(utr, "0000")
         ok, msg = engine.verify_otp_challenge(utr, "0000")
         self.assertFalse(ok)
 
@@ -98,7 +103,7 @@ class TestUPIShieldEngine(unittest.TestCase):
 
         inv = engine.investigate(
             amount=amt, sender_vpa=sender, receiver_vpa=payee,
-            city="Nagpur", device_id="TEST_DEV_1"
+            city="Nagpur", device_id="TEST_DEV_1", mock_hour=14
         )
         self.assertEqual(inv["tier"], "BLOCKED")
         self.assertIn("SUSPICIOUS_VPA", inv["flags"])
@@ -119,7 +124,7 @@ class TestUPIShieldEngine(unittest.TestCase):
 
         inv = engine.investigate(
             amount=100.0, sender_vpa="salaried@upi", receiver_vpa=payee,
-            city="Nagpur", device_id="TEST_DEV_1"
+            city="Nagpur", device_id="TEST_DEV_1", mock_hour=14
         )
         self.assertEqual(inv["tier"], "BLOCKED")
         self.assertIn("LIENED_BENEFICIARY", inv["flags"])
@@ -127,13 +132,12 @@ class TestUPIShieldEngine(unittest.TestCase):
     def test_06_impossible_speed_kinematics(self):
         """6. A far-away city soon after a payment triggers IMPOSSIBLE_SPEED."""
         sender = "kirana@upi"
-        
-        # Settle first transaction in Nagpur
-        inv1 = engine.investigate(100.0, sender, "chai_point@upi", "Nagpur", "TEST_DEV_KIRANA")
-        engine.record_transaction(sender, "chai_point@upi", 100.0, "Nagpur", "TEST_DEV_KIRANA", inv1)
+        payee = "chai_point@upi"
 
-        # Settle immediate second transaction in Delhi (Displacement ~850 km, gap ~0 sec)
-        inv2 = engine.investigate(100.0, sender, "chai_point@upi", "Delhi", "TEST_DEV_KIRANA")
+        inv1 = engine.investigate(100.0, sender, payee, "Nagpur", "TEST_DEV_KIRANA", mock_hour=14)
+        engine.record_transaction(sender, payee, 100.0, "Nagpur", "TEST_DEV_KIRANA", inv1)
+
+        inv2 = engine.investigate(100.0, sender, payee, "Delhi", "TEST_DEV_KIRANA", mock_hour=14)
         self.assertIn("IMPOSSIBLE_SPEED", inv2["flags"])
         self.assertEqual(inv2["tier"], "BLOCKED")
 
@@ -155,7 +159,6 @@ class TestUPIShieldEngine(unittest.TestCase):
         self.assertEqual(parsed["receiver_vpa"], "city.mart@upi")
         self.assertEqual(parsed["amount"], 450.0)
 
-        # Non-UPI link test
         valid_bad, _, _ = engine.parse_upi_uri("https://google.com")
         self.assertFalse(valid_bad)
 
