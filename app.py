@@ -518,4 +518,418 @@ elif st.session_state["active_nav"] == "Dashboard":
         <div class="bento-card" style="line-height:1.8;">
             <strong>1. Telemetry Capture:</strong> Extracts sender, receiver, amount, city displacement, time, and device token.<br>
             <strong>2. Hard Rule Firewall:</strong> Immediately triggers on active liens, known scam patterns in VPAs, and kinematic travel violations (&gt;300 km/h).<br>
-            <strong>3. Behavioral Random Forest:</strong> Evaluates subtle non-linear dependencies (burst velocity, account drain percentage, spending spike).
+            <strong>3. Behavioral Random Forest:</strong> Evaluates subtle non-linear dependencies (burst velocity, account drain percentage, spending spike).<br>
+            <strong>4. Composite Multi-Tier Decision:</strong>
+            <ul>
+                <li><strong>CLEARED:</strong> All safety margins verified. Direct instant debit.</li>
+                <li><strong>PENDING_OTP:</strong> Pre-debit hold engaged. Funds reserved; authorization requires step-up OTP challenge.</li>
+                <li><strong>BLOCKED:</strong> High risk anomaly threshold violated. Dropped before debit occurs.</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+
+# =============================================================================
+# VIEW 3: FRAUD DETECTION GATEWAY
+# =============================================================================
+elif st.session_state["active_nav"] == "Fraud Detection":
+    st.markdown("## 🛡️ Fraud Detection Gateway")
+    st.caption("Perform real-time payments, inspect transactions, or stress-test scenarios.")
+
+    tab_checkout, tab_stress, tab_ledger = st.tabs([
+        "⚡ Merchant Checkout", "📋 Manual Analysis & Stress-Testing", "📑 Ledger & Remediation"
+    ])
+
+    # -------------------------------------------------------------------------
+    # TAB 1: Merchant Checkout
+    # -------------------------------------------------------------------------
+    with tab_checkout:
+        col_pay_form, col_telemetry = st.columns([1.1, 1])
+
+        with col_pay_form:
+            st.markdown('<div class="bento-card">', unsafe_allow_html=True)
+            st.markdown('<div class="bento-card-title">💳 Client Payment Terminal</div>', unsafe_allow_html=True)
+
+            # Account Selector
+            conn = engine.get_db_connection()
+            accounts = conn.execute("SELECT * FROM accounts WHERE is_merchant = 0").fetchall()
+            conn.close()
+
+            acc_map = {f"{r['name']} ({r['persona']})": r['vpa'] for r in accounts}
+            sel_acc_label = st.selectbox("Debit From Account:", list(acc_map.keys()), key="chk_acc_sel")
+            active_sender_vpa = acc_map[sel_acc_label]
+
+            # Fetch Balances
+            conn = engine.get_db_connection()
+            s_acc = conn.execute("SELECT * FROM accounts WHERE vpa = ?", (active_sender_vpa,)).fetchone()
+            c_res = conn.execute("SELECT SUM(amount) as reserved FROM transactions WHERE sender_vpa = ? AND status = 'PENDING_OTP'", (active_sender_vpa,)).fetchone()
+            reserved = c_res["reserved"] if c_res and c_res["reserved"] else 0.0
+            avail_balance = s_acc["balance"] - reserved
+
+            # Trust Device Check
+            c_dev = conn.execute("SELECT * FROM devices WHERE account_vpa = ? AND device_id = ?", (active_sender_vpa, device_id)).fetchone()
+            conn.close()
+
+            dev_trusted = (c_dev is not None)
+            st.markdown(f"""
+            <div style="font-size:0.95rem; margin: 8px 0 16px 0; opacity:0.85;">
+                Ledger Balance: <strong>₹{s_acc['balance']:,.2f}</strong> &nbsp;|&nbsp; 
+                Available: <strong>₹{avail_balance:,.2f}</strong> &nbsp;|&nbsp; 
+                Device Trust: <strong>{'🟢 Trusted' if dev_trusted else '⚠️ New / Unknown'}</strong>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if not dev_trusted:
+                if st.button("Register & Trust This Device", key="btn_trust_dev"):
+                    conn = engine.get_db_connection()
+                    conn.execute("INSERT OR IGNORE INTO devices (account_vpa, device_id) VALUES (?, ?)", (active_sender_vpa, device_id))
+                    conn.commit()
+                    conn.close()
+                    st.success("Current device added to trusted list.")
+                    st.rerun()
+
+            # Method Selector
+            pay_method = st.radio("Payment Method", ["UPI ID / VPA", "Scan / Upload QR", "UPI Deep Link"], horizontal=True, key="chk_method_radio")
+
+            target_payee = ""
+            target_amount = 0.0
+
+            if pay_method == "UPI ID / VPA":
+                target_payee = st.text_input("Beneficiary UPI ID:", "chai_point@upi", key="chk_vpa_input")
+                target_amount = st.number_input("Amount (₹):", min_value=1.0, value=50.0, step=10.0, key="chk_amt_input")
+
+            elif pay_method == "Scan / Upload QR":
+                qr_file = st.file_uploader("Upload QR Code Image:", type=["png", "jpg", "jpeg"], key="chk_qr_file")
+                if qr_file is not None:
+                    raw_bytes = qr_file.read()
+                    data, err = engine.decode_qr_image(raw_bytes)
+                    if data:
+                        valid, parsed, msg = engine.parse_upi_uri(data)
+                        if valid:
+                            st.success(f"Decoded Payee: {parsed['receiver_vpa']} (₹{parsed['amount']})")
+                            target_payee = parsed["receiver_vpa"]
+                            target_amount = parsed["amount"] if parsed["amount"] > 0 else st.number_input("Enter Amount (₹):", min_value=1.0, value=100.0, key="chk_qr_amt_fix")
+                        else:
+                            st.error(msg)
+                    else:
+                        st.error(err)
+
+            else:
+                raw_uri = st.text_input("Paste UPI Deep Link (upi://pay?...):", "", key="chk_raw_uri")
+                if raw_uri:
+                    valid, parsed, msg = engine.parse_upi_uri(raw_uri)
+                    if valid:
+                        st.success(f"Validated: {parsed['receiver_vpa']} | INR {parsed['amount']}")
+                        target_payee = parsed["receiver_vpa"]
+                        target_amount = parsed["amount"] if parsed["amount"] > 0 else st.number_input("Enter Amount (₹):", min_value=1.0, value=100.0, key="chk_uri_amt_fix")
+                    else:
+                        st.error(msg)
+
+            # City Selector
+            selected_city = st.selectbox("Current Transaction City:", list(engine.INDIAN_CITIES.keys()), index=0, key="chk_city_sel")
+
+            # Scam Flags
+            col_scam1, col_scam2 = st.columns(2)
+            with col_scam1:
+                chk_call = st.checkbox("📞 Active Unknown Call", key="chk_call_flag")
+            with col_scam2:
+                chk_link = st.checkbox("🔗 External Link Source", key="chk_link_flag")
+
+            can_proceed = True
+            if chk_call or chk_link:
+                st.error("⚠️ **CRITICAL PRE-PAYMENT WARNING:** Never send money over voice calls or unsolicited messages.")
+                can_proceed = st.checkbox("I verify this recipient and authorize under personal discretion.", key="chk_scam_override")
+
+            pay_submitted = st.button("🚀 Authorize & Pay", type="primary", disabled=not can_proceed, key="btn_submit_pay")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            # QR Generator Tool
+            with st.expander("🛠️ Merchant QR Code Generator Tool", expanded=False):
+                g_vpa = st.text_input("Generator VPA:", "chai_point@upi", key="gen_vpa")
+                g_name = st.text_input("Payee Name:", "Chai Point Counter", key="gen_name")
+                g_amt = st.number_input("Preset Amount (₹):", min_value=0.0, value=120.0, key="gen_amt")
+                if st.button("Generate QR Code", key="btn_gen_qr"):
+                    qr_img, qr_link = engine.generate_upi_qr(g_vpa, g_name, g_amt)
+                    buf = io.BytesIO()
+                    qr_img.save(buf, format="PNG")
+                    st.image(buf.getvalue(), caption=f"QR for {g_vpa}", width=200)
+                    st.code(qr_link, language="text")
+
+        # Telemetry & Switch Execution Result
+        with col_telemetry:
+            if pay_submitted and target_payee:
+                inv = engine.investigate(
+                    amount=target_amount,
+                    sender_vpa=active_sender_vpa,
+                    receiver_vpa=target_payee,
+                    city=selected_city,
+                    device_id=device_id,
+                    active_call=chk_call,
+                    external_link=chk_link,
+                    model=rf_model,
+                    scaler=rf_scaler
+                )
+                
+                utr, status = engine.record_transaction(
+                    sender_vpa=active_sender_vpa,
+                    receiver_vpa=target_payee,
+                    amount=target_amount,
+                    city=selected_city,
+                    device_id=device_id,
+                    inv_result=inv
+                )
+
+                st.session_state["active_tx"] = {
+                    "utr": utr,
+                    "status": status,
+                    "inv": inv,
+                    "amount": target_amount,
+                    "receiver": target_payee,
+                    "sender": active_sender_vpa
+                }
+
+                if status == "PENDING_OTP":
+                    engine.create_otp_challenge(utr, device_id, active_sender_vpa)
+
+            # Render Active Transaction Telemetry Panel
+            if "active_tx" in st.session_state:
+                tx_info = st.session_state["active_tx"]
+                inv = tx_info["inv"]
+                st.markdown('<div class="bento-card">', unsafe_allow_html=True)
+                st.markdown(f'<div class="bento-card-title">⚙️ Switch Interception: UTR {tx_info["utr"]}</div>', unsafe_allow_html=True)
+                
+                # Donut Risk Gauge
+                st.markdown(render_donut_gauge(inv["score"], inv["tier"]), unsafe_allow_html=True)
+
+                # Metric Tiles
+                m = inv["metrics"]
+                st.markdown(f"""
+                <div class="metric-grid">
+                    <div class="metric-tile">
+                        <div class="tile-lbl">Drain Ratio</div>
+                        <div class="tile-val">{m['drain_ratio']*100:.1f}%</div>
+                    </div>
+                    <div class="metric-tile">
+                        <div class="tile-lbl">Spend Surge</div>
+                        <div class="tile-val">{m['amount_to_avg']:.1f}x</div>
+                    </div>
+                    <div class="metric-tile">
+                        <div class="tile-lbl">Speed</div>
+                        <div class="tile-val">{m['speed_kmh']:,.0f} <span style="font-size:0.9rem;">km/h</span></div>
+                    </div>
+                    <div class="metric-tile">
+                        <div class="tile-lbl">Latency</div>
+                        <div class="tile-val">{inv['latency_ms']:.1f} <span style="font-size:0.9rem;">ms</span></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # Decision Verdict
+                if inv["tier"] == "CLEARED":
+                    st.success(f"✅ **Payment Settled!** UTR: `{tx_info['utr']}`")
+                elif inv["tier"] == "PENDING_OTP":
+                    st.warning(f"⏸️ **Pre-Debit Security Freeze Engaged:** Unusual behavioral signals detected.")
+                    st.markdown(f"*{html.escape(inv['reason'])}*")
+                    
+                    # OTP Input Box
+                    c_otp1, c_otp2 = st.columns([1.5, 1])
+                    with c_otp1:
+                        entered_otp = st.text_input("Enter 4-Digit Security OTP:", max_chars=4, key="chk_otp_val")
+                        if st.button("Unlock & Release Debit", type="primary", key="btn_verify_otp"):
+                            success, msg = engine.verify_otp_challenge(tx_info["utr"], entered_otp)
+                            if success:
+                                st.success(msg)
+                                st.session_state["active_tx"]["status"] = "SUCCESS"
+                                st.session_state["active_tx"]["inv"]["tier"] = "CLEARED"
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    with c_otp2:
+                        st.write("")
+                        st.write("")
+                        if st.button("Resend OTP", key="btn_resend_otp"):
+                            r_ok, r_msg = engine.resend_otp_challenge(tx_info["utr"], device_id, tx_info["sender"])
+                            if r_ok:
+                                st.info(r_msg)
+                            else:
+                                st.error(r_msg)
+                else:
+                    st.error(f"🚫 **Payment Terminated by Switch:** {inv['reason']}")
+
+                # Explainable AI Audit Log
+                with st.expander("🔍 Explainable AI (XAI) Audit Checklist", expanded=False):
+                    for name, detail, state in inv["log"]:
+                        b_cls = "badge-pass" if state == "OK" else "badge-block"
+                        sym = "✓" if state == "OK" else "⚠️"
+                        st.markdown(f"""
+                        <div class="step-item">
+                            <div>
+                                <div class="step-title">{html.escape(name)}</div>
+                                <div class="step-sub">{html.escape(detail)}</div>
+                            </div>
+                            <span class="{b_cls}">{sym} {html.escape(state)}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            # Simulated Phone SMS Inbox View
+            with st.expander("📱 Simulated Phone SMS Inbox", expanded=False):
+                conn = engine.get_db_connection()
+                sms_list = conn.execute("SELECT * FROM sms_inbox WHERE device_id = ? ORDER BY id DESC LIMIT 3", (device_id,)).fetchall()
+                conn.close()
+                if sms_list:
+                    for s in sms_list:
+                        st.markdown(f"**[{s['timestamp']}]** `{html.escape(s['message'])}`")
+                else:
+                    st.caption("No SMS messages dispatched to this device.")
+
+    # -------------------------------------------------------------------------
+    # TAB 2: Manual Analysis & Stress-Testing
+    # -------------------------------------------------------------------------
+    with tab_stress:
+        st.markdown('<div class="bento-card">', unsafe_allow_html=True)
+        st.markdown('<div class="bento-card-title">🧪 What-If Stress-Testing Simulator</div>', unsafe_allow_html=True)
+        st.caption("Perform parameter permutations without writing records to the persistent ledger.")
+
+        p_col1, p_col2 = st.columns(2)
+        with p_col1:
+            st_amt = st.number_input("Amount (₹):", min_value=1.0, value=25000.0, step=500.0, key="st_amt")
+            st_bal = st.number_input("Account Balance (₹):", min_value=0.0, value=30000.0, step=1000.0, key="st_bal")
+            st_avg = st.number_input("Habitual Daily Average (₹):", min_value=1.0, value=1500.0, step=100.0, key="st_avg")
+            st_vpa = st.text_input("Beneficiary VPA:", "claim-refund@fakebank", key="st_vpa")
+        with p_col2:
+            st_dist = st.number_input("Displacement (km):", min_value=0.0, value=850.0, step=50.0, key="st_dist")
+            st_gap = st.number_input("Time Elapsed (seconds):", min_value=1.0, value=600.0, step=60.0, key="st_gap")
+            st_tx_cnt = st.number_input("10-Min Payment Burst Count:", min_value=0, value=4, key="st_tx_cnt")
+            st_new_dev = st.checkbox("Simulate New Device Token", value=True, key="st_new_dev")
+
+        if st.button("Run Simulation Inspection", type="primary", key="btn_run_stress"):
+            drain = st_amt / (st_bal + 1e-5)
+            surge = st_amt / (st_avg + 1e-5)
+            speed = st_dist / max(st_gap / 3600.0, 0.0001)
+
+            st_flags = []
+            st_log = []
+
+            if re.search(r"(refund|cashback|lottery|winner|kyc|support)", st_vpa.lower()):
+                st_flags.append("SUSPICIOUS_VPA")
+                st_log.append(("Scam Pattern", "VPA string contains malicious keywords.", "ALERT"))
+            if speed > 300.0 and st_dist > 20.0:
+                st_flags.append("IMPOSSIBLE_SPEED")
+                st_log.append(("Kinematic Velocity", f"Violated physical transit speed ({speed:,.0f} km/h).", "ALERT"))
+            if drain > 0.65:
+                st_flags.append("HIGH_DRAIN")
+                st_log.append(("Account Drain", f"Elevated balance drain ({drain*100:.1f}%).", "ALERT"))
+            if surge > 3.5:
+                st_flags.append("SPENDING_SPIKE")
+                st_log.append(("Spending Spike", f"Surge of {surge:.1f}x historical baseline.", "ALERT"))
+
+            score = 0.99 if any(f in ["SUSPICIOUS_VPA", "IMPOSSIBLE_SPEED"] for f in st_flags) else (0.52 if st_flags else 0.12)
+            sim_tier = "BLOCKED" if score >= 0.90 else ("PENDING_OTP" if score >= 0.35 else "CLEARED")
+
+            st.markdown("---")
+            st.markdown(render_donut_gauge(score, sim_tier), unsafe_allow_html=True)
+            st.markdown(f"**Simulated Flags:** `{', '.join(st_flags) if st_flags else 'None'}`")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # -------------------------------------------------------------------------
+    # TAB 3: Ledger & Remediation
+    # -------------------------------------------------------------------------
+    with tab_ledger:
+        st.markdown('<div class="bento-card">', unsafe_allow_html=True)
+        st.markdown('<div class="bento-card-title">📑 Transaction Ledger Audit</div>', unsafe_allow_html=True)
+
+        conn = engine.get_db_connection()
+        df_ledger = pd.read_sql_query("SELECT id, utr, sender_vpa, receiver_vpa, amount, status, risk_score, latency_ms, timestamp FROM transactions ORDER BY id DESC LIMIT 50", conn)
+        conn.close()
+
+        if not df_ledger.empty:
+            st.dataframe(df_ledger)
+            csv_buf = df_ledger.to_csv(index=False).encode("utf-8")
+            st.download_button("📥 Export Ledger Audit (CSV)", data=csv_buf, file_name="upi_shield_ledger.csv", mime="text/csv", key="btn_export_csv")
+        else:
+            st.caption("Ledger is currently empty.")
+
+        st.markdown("---")
+        st.markdown('<div class="bento-card-title">🚨 Active Beneficiary Liens & Regulatory Escalation</div>', unsafe_allow_html=True)
+        
+        col_lien1, col_lien2 = st.columns(2)
+        with col_lien1:
+            st.markdown("##### Place Legal Lien on VPA")
+            l_vpa = st.text_input("Payee VPA:", "claim-refund@fakebank", key="lien_in_vpa")
+            l_reason = st.text_input("Lien Cause:", "Digital Arrest Extortion Pattern", key="lien_in_reason")
+            if st.button("Enforce Regulatory Lien", type="primary", key="btn_place_lien"):
+                engine.place_beneficiary_lien(l_vpa, l_reason)
+                st.success(f"Lien successfully enforced against '{l_vpa}'. All future transfers will be blocked.")
+                st.rerun()
+
+        with col_lien2:
+            st.markdown("##### Active Liens")
+            conn = engine.get_db_connection()
+            liens = conn.execute("SELECT * FROM liens ORDER BY id DESC").fetchall()
+            conn.close()
+            if liens:
+                for ln in liens:
+                    st.markdown(f"**{ln['receiver_vpa']}** — *{ln['reason']}*")
+                    if st.button(f"Release Lien: {ln['receiver_vpa']}", key=f"btn_rel_{ln['id']}"):
+                        engine.remove_beneficiary_lien(ln['receiver_vpa'])
+                        st.info("Lien removed.")
+                        st.rerun()
+            else:
+                st.caption("No active liens currently recorded.")
+
+        st.markdown("---")
+        st.markdown("##### 📄 Generate Statutory Bank Dispute Dossier")
+        dossier_utr = st.text_input("Enter Transaction UTR Reference:", key="txt_dossier_utr")
+        if st.button("Generate Official Legal Dossier", key="btn_gen_dossier"):
+            dossier_txt = engine.generate_dispute_dossier(dossier_utr)
+            st.text_area("Legal Dossier Output", dossier_txt, height=220)
+            st.download_button("📥 Download Dossier (.txt)", data=dossier_txt, file_name=f"Dispute_{dossier_utr}.txt", key="btn_dl_dossier")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# =============================================================================
+# VIEW 4: SETTINGS & CONFIGURATION
+# =============================================================================
+elif st.session_state["active_nav"] == "Settings":
+    st.markdown("## ⚙️ System Settings & Policies")
+    st.caption("Adjust policy thresholds and inspect registered devices.")
+
+    st.markdown('<div class="bento-card">', unsafe_allow_html=True)
+    st.markdown('<div class="bento-card-title">Threshold Policies</div>', unsafe_allow_html=True)
+
+    curr_cfg = engine.get_settings()
+    rev_val = st.slider("Pre-Debit OTP Review Threshold:", 0.10, 0.80, float(curr_cfg["review_threshold"]), 0.05, key="set_rev")
+    blk_val = st.slider("Definitive Block Threshold:", 0.50, 0.99, float(curr_cfg["block_threshold"]), 0.05, key="set_blk")
+    drain_limit = st.slider("Account Drain Limit Ratio:", 0.30, 0.95, float(curr_cfg["drain_ratio_limit"]), 0.05, key="set_drain")
+    spike_limit = st.slider("Spending Surge Multiplier:", 1.5, 10.0, float(curr_cfg["spending_spike_multiplier"]), 0.5, key="set_spike")
+    hold_soft = st.checkbox("Force Pre-Debit OTP Hold on Single Soft Flag (e.g. OFF_HOURS)", value=bool(curr_cfg["hold_on_single_soft_flag"]), key="set_soft")
+
+    if rev_val >= blk_val:
+        st.error("Validation Error: Review threshold must be strictly lower than Block threshold.")
+    else:
+        if st.button("Save Policy Settings", type="primary", key="btn_save_settings"):
+            conn = engine.get_db_connection()
+            conn.execute("UPDATE settings SET value = ? WHERE key = 'review_threshold'", (rev_val,))
+            conn.execute("UPDATE settings SET value = ? WHERE key = 'block_threshold'", (blk_val,))
+            conn.execute("UPDATE settings SET value = ? WHERE key = 'drain_ratio_limit'", (drain_limit,))
+            conn.execute("UPDATE settings SET value = ? WHERE key = 'spending_spike_multiplier'", (spike_limit,))
+            conn.execute("UPDATE settings SET value = ? WHERE key = 'hold_on_single_soft_flag'", (1.0 if hold_soft else 0.0,))
+            conn.commit()
+            conn.close()
+            st.success("Policies updated successfully.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="bento-card">', unsafe_allow_html=True)
+    st.markdown('<div class="bento-card-title">Danger Zone: Database Reset</div>', unsafe_allow_html=True)
+    st.caption("Re-seeds all accounts to default balances, clears transaction history, and removes all enrolled devices.")
+    confirm_reset = st.checkbox("I confirm that I want to wipe and re-initialize the database.", key="chk_wipe_confirm")
+    if st.button("Reset Entire Database", type="secondary", disabled=not confirm_reset, key="btn_wipe_db"):
+        engine.init_db(force_reset=True)
+        st.success("Database restored to pristine factory baseline.")
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
