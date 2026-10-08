@@ -198,16 +198,15 @@ def load_rf_artifacts():
 rf_model, rf_scaler, rf_status_msg = load_rf_artifacts()
 
 # -----------------------------------------------------------------------------
-# Navigation State Management & Direct Redirection Helper
+# Navigation State Management
 # -----------------------------------------------------------------------------
 pages = ["Home", "Dashboard", "Fraud Detection", "Settings"]
 
-if "active_nav" not in st.session_state:
-    st.session_state["active_nav"] = "Home"
+if "nav_selection" not in st.session_state:
+    st.session_state["nav_selection"] = "Home"
 
-def navigate_to(page_name):
-    st.session_state["active_nav"] = page_name
-    st.session_state["sidebar_nav_radio"] = page_name
+def on_nav_change():
+    st.session_state["nav_selection"] = st.session_state["nav_radio_widget"]
 
 # -----------------------------------------------------------------------------
 # Sidebar Navigation
@@ -216,12 +215,14 @@ with st.sidebar:
     st.markdown("### 🛡️ UPI Shield")
     st.caption("Intelligent Fraud Mitigation Gateway")
     
-    cur_idx = pages.index(st.session_state["active_nav"]) if st.session_state["active_nav"] in pages else 0
-    selected_page = st.radio("Navigation", pages, index=cur_idx, key="sidebar_nav_radio")
-    
-    if selected_page != st.session_state["active_nav"]:
-        st.session_state["active_nav"] = selected_page
-        st.rerun()
+    cur_idx = pages.index(st.session_state["nav_selection"]) if st.session_state["nav_selection"] in pages else 0
+    st.radio(
+        "Navigation",
+        pages,
+        index=cur_idx,
+        key="nav_radio_widget",
+        on_change=on_nav_change
+    )
 
     st.markdown("---")
     st.markdown(f"**Session Device:** `{html.escape(device_id)}`")
@@ -271,7 +272,7 @@ def render_donut_gauge(risk_score, tier):
 # =============================================================================
 # VIEW 1: HOME PAGE
 # =============================================================================
-if st.session_state["active_nav"] == "Home":
+if st.session_state["nav_selection"] == "Home":
     st.markdown("""
     <div style="padding: 10px 0 25px 0;">
         <h1 style="font-size: 3.2rem; font-weight: 900; margin-bottom: 8px;">🛡️ UPI Shield</h1>
@@ -288,7 +289,7 @@ if st.session_state["active_nav"] == "Home":
     """, unsafe_allow_html=True)
 
     if st.button("Launch Fraud Detection Switch →", type="primary", key="home_btn_launch"):
-        navigate_to("Fraud Detection")
+        st.session_state["nav_selection"] = "Fraud Detection"
         st.rerun()
 
     st.markdown("<hr style='border:none; border-top:1px solid rgba(128,128,128,0.25); margin:36px 0;'>", unsafe_allow_html=True)
@@ -328,7 +329,7 @@ if st.session_state["active_nav"] == "Home":
 # =============================================================================
 # VIEW 2: DASHBOARD & ANALYTICS
 # =============================================================================
-elif st.session_state["active_nav"] == "Dashboard":
+elif st.session_state["nav_selection"] == "Dashboard":
     st.markdown("## 📊 Dashboard & Operational Analytics")
     st.caption("Live operational metrics derived directly from the active SQLite ledger.")
 
@@ -531,7 +532,7 @@ elif st.session_state["active_nav"] == "Dashboard":
 # =============================================================================
 # VIEW 3: FRAUD DETECTION GATEWAY
 # =============================================================================
-elif st.session_state["active_nav"] == "Fraud Detection":
+elif st.session_state["nav_selection"] == "Fraud Detection":
     st.markdown("## 🛡️ Fraud Detection Gateway")
     st.caption("Perform real-time payments, inspect transactions, or stress-test scenarios.")
 
@@ -549,7 +550,6 @@ elif st.session_state["active_nav"] == "Fraud Detection":
             st.markdown('<div class="bento-card">', unsafe_allow_html=True)
             st.markdown('<div class="bento-card-title">💳 Client Payment Terminal</div>', unsafe_allow_html=True)
 
-            # Account Selector
             conn = engine.get_db_connection()
             accounts = conn.execute("SELECT * FROM accounts WHERE is_merchant = 0").fetchall()
             conn.close()
@@ -558,14 +558,12 @@ elif st.session_state["active_nav"] == "Fraud Detection":
             sel_acc_label = st.selectbox("Debit From Account:", list(acc_map.keys()), key="chk_acc_sel")
             active_sender_vpa = acc_map[sel_acc_label]
 
-            # Fetch Balances
             conn = engine.get_db_connection()
             s_acc = conn.execute("SELECT * FROM accounts WHERE vpa = ?", (active_sender_vpa,)).fetchone()
             c_res = conn.execute("SELECT SUM(amount) as reserved FROM transactions WHERE sender_vpa = ? AND status = 'PENDING_OTP'", (active_sender_vpa,)).fetchone()
             reserved = c_res["reserved"] if c_res and c_res["reserved"] else 0.0
             avail_balance = s_acc["balance"] - reserved
 
-            # Trust Device Check
             c_dev = conn.execute("SELECT * FROM devices WHERE account_vpa = ? AND device_id = ?", (active_sender_vpa, device_id)).fetchone()
             conn.close()
 
@@ -587,7 +585,6 @@ elif st.session_state["active_nav"] == "Fraud Detection":
                     st.success("Current device added to trusted list.")
                     st.rerun()
 
-            # Method Selector
             pay_method = st.radio("Payment Method", ["UPI ID / VPA", "Scan / Upload QR", "UPI Deep Link"], horizontal=True, key="chk_method_radio")
 
             target_payee = ""
@@ -624,10 +621,8 @@ elif st.session_state["active_nav"] == "Fraud Detection":
                     else:
                         st.error(msg)
 
-            # City Selector
             selected_city = st.selectbox("Current Transaction City:", list(engine.INDIAN_CITIES.keys()), index=0, key="chk_city_sel")
 
-            # Scam Flags
             col_scam1, col_scam2 = st.columns(2)
             with col_scam1:
                 chk_call = st.checkbox("📞 Active Unknown Call", key="chk_call_flag")
@@ -642,7 +637,6 @@ elif st.session_state["active_nav"] == "Fraud Detection":
             pay_submitted = st.button("🚀 Authorize & Pay", type="primary", disabled=not can_proceed, key="btn_submit_pay")
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # QR Generator Tool
             with st.expander("🛠️ Merchant QR Code Generator Tool", expanded=False):
                 g_vpa = st.text_input("Generator VPA:", "chai_point@upi", key="gen_vpa")
                 g_name = st.text_input("Payee Name:", "Chai Point Counter", key="gen_name")
@@ -654,7 +648,6 @@ elif st.session_state["active_nav"] == "Fraud Detection":
                     st.image(buf.getvalue(), caption=f"QR for {g_vpa}", width=200)
                     st.code(qr_link, language="text")
 
-        # Telemetry & Switch Execution Result
         with col_telemetry:
             if pay_submitted and target_payee:
                 inv = engine.investigate(
@@ -690,17 +683,14 @@ elif st.session_state["active_nav"] == "Fraud Detection":
                 if status == "PENDING_OTP":
                     engine.create_otp_challenge(utr, device_id, active_sender_vpa)
 
-            # Render Active Transaction Telemetry Panel
             if "active_tx" in st.session_state:
                 tx_info = st.session_state["active_tx"]
                 inv = tx_info["inv"]
                 st.markdown('<div class="bento-card">', unsafe_allow_html=True)
                 st.markdown(f'<div class="bento-card-title">⚙️ Switch Interception: UTR {tx_info["utr"]}</div>', unsafe_allow_html=True)
                 
-                # Donut Risk Gauge
                 st.markdown(render_donut_gauge(inv["score"], inv["tier"]), unsafe_allow_html=True)
 
-                # Metric Tiles
                 m = inv["metrics"]
                 st.markdown(f"""
                 <div class="metric-grid">
@@ -725,14 +715,12 @@ elif st.session_state["active_nav"] == "Fraud Detection":
 
                 st.markdown("<br>", unsafe_allow_html=True)
 
-                # Decision Verdict
                 if inv["tier"] == "CLEARED":
                     st.success(f"✅ **Payment Settled!** UTR: `{tx_info['utr']}`")
                 elif inv["tier"] == "PENDING_OTP":
                     st.warning(f"⏸️ **Pre-Debit Security Freeze Engaged:** Unusual behavioral signals detected.")
                     st.markdown(f"*{html.escape(inv['reason'])}*")
                     
-                    # OTP Input Box
                     c_otp1, c_otp2 = st.columns([1.5, 1])
                     with c_otp1:
                         entered_otp = st.text_input("Enter 4-Digit Security OTP:", max_chars=4, key="chk_otp_val")
@@ -757,7 +745,6 @@ elif st.session_state["active_nav"] == "Fraud Detection":
                 else:
                     st.error(f"🚫 **Payment Terminated by Switch:** {inv['reason']}")
 
-                # Explainable AI Audit Log
                 with st.expander("🔍 Explainable AI (XAI) Audit Checklist", expanded=False):
                     for name, detail, state in inv["log"]:
                         b_cls = "badge-pass" if state == "OK" else "badge-block"
@@ -774,7 +761,6 @@ elif st.session_state["active_nav"] == "Fraud Detection":
 
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            # Simulated Phone SMS Inbox View
             with st.expander("📱 Simulated Phone SMS Inbox", expanded=False):
                 conn = engine.get_db_connection()
                 sms_list = conn.execute("SELECT * FROM sms_inbox WHERE device_id = ? ORDER BY id DESC LIMIT 3", (device_id,)).fetchall()
@@ -894,7 +880,7 @@ elif st.session_state["active_nav"] == "Fraud Detection":
 # =============================================================================
 # VIEW 4: SETTINGS & CONFIGURATION
 # =============================================================================
-elif st.session_state["active_nav"] == "Settings":
+elif st.session_state["nav_selection"] == "Settings":
     st.markdown("## ⚙️ System Settings & Policies")
     st.caption("Adjust policy thresholds and inspect registered devices.")
 
